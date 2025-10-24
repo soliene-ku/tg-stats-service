@@ -51,7 +51,7 @@ async def hourly_async(channel: str):
     async with await get_client() as client:
         try:
             entity = await client.get_entity(channel)
-           stats = await client(stats_fns.GetBroadcastStats(channel=entity))
+            stats = await client(stats_fns.GetBroadcastStats(channel=entity))
         except (UsernameInvalidError, UsernameNotOccupiedError):
             return jsonify({"error": "Channel username not found", "channel": channel}), 400
         except ChannelPrivateError:

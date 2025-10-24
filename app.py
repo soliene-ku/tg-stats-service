@@ -1,4 +1,4 @@
-# app.py — final assembled
+# app.py — final
 import os
 import json
 import asyncio
@@ -19,27 +19,23 @@ from telethon.errors import (
     FloodWaitError,
 )
 from telethon.tl.functions import stats as stats_fns
+from telethon.tl.types import DataJSON
 
 # ── Settings ───────────────────────────────────────────────────────────────────
 TZ = pytz.timezone("Europe/Lisbon")
 POSITIVE_EMOJIS = {
     "👍", "❤️", "🔥", "👏", "😁", "😊", "🥳", "😻", "✨", "💯", "🙌", "😍", "😎"
 }
-
 app = Flask(__name__)
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def env_ok() -> bool:
     return all(os.getenv(k) for k in ("TG_API_ID", "TG_API_HASH", "TG_STRING_SESSION"))
 
-
 def ts_to_lisbon(ts: int) -> datetime:
     return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ)
 
-
 def create_client() -> TelegramClient:
-    """Ліниво читаємо ENV та створюємо клієнт."""
     api_id = os.getenv("TG_API_ID")
     api_hash = os.getenv("TG_API_HASH")
     string_session = os.getenv("TG_STRING_SESSION")
@@ -51,64 +47,17 @@ def create_client() -> TelegramClient:
         raise RuntimeError("TG_API_ID must be an integer")
     return TelegramClient(StringSession(string_session), api_id, api_hash)
 
-@app.get("/hourly_debug")
-def hourly_debug_sync():
-    channel = request.args.get("channel", "").strip()
-    if not channel:
-        return jsonify({"error": "Missing ?channel=@your_channel"}), 400
-    try:
-        return asyncio.run(hourly_debug_async(channel))
-    except Exception as e:
-        return jsonify({"error": "debug fail", "detail": str(e)}), 500
-
-async def hourly_debug_async(channel: str):
-    async with create_client() as client:
-        entity = await client.get_entity(channel)
-
-        # який саме метод є у твоїй Telethon
-        use_stats = (
-            stats_fns.GetBroadcastStats(channel=entity)
-            if hasattr(stats_fns, "GetBroadcastStats")
-            else stats_fns.GetBroadcastStatsRequest(channel=entity)
-        )
-        stats = await client(use_stats)
-
-        # подивимося, які поля в stats
-        attrs = [a for a in dir(stats) if "graph" in a or "hour" in a or "view" in a]
-
-        # візьмемо перший з можливих графів
-        graph = (
-            getattr(stats, "top_hours_graph", None)
-            or getattr(stats, "hours_graph", None)
-            or getattr(stats, "views_graph", None)
-        )
-
-        info = {
-            "attrs_in_stats": attrs,
-            "graph_present": graph is not None,
-            "graph_class": type(graph).__name__ if graph else None,
-            "has_points_attr": bool(getattr(graph, "points", None)) if graph else False,
-            "has_json_attr": bool(getattr(graph, "json", None)) if graph else False,
-        }
-
-        # якщо асинхр. граф — спробуймо догрузити
-        if isinstance(graph, types.StatsGraphAsync):
-            loader = (stats_fns.LoadAsyncGraph if hasattr(stats_fns, "LoadAsyncGraph")
-                      else stats_fns.LoadAsyncGraphRequest)
-            loaded = await client(loader(token=graph.token, x=0))
-            info["loaded_class"] = type(loaded).__name__
-            info["loaded_has_points"] = bool(getattr(loaded, "points", None))
-            j = getattr(loaded, "json", None)
-            info["loaded_has_json"] = bool(j)
-            info["loaded_json_preview"] = (j or "")[:500]
-            return jsonify(info)
-
-        # якщо одразу JSON — дай прев’ю
-        if graph is not None:
-            j = getattr(graph, "json", None)
-            info["json_preview"] = (j or "")[:500]
-        return jsonify(info)
-
+def json_text(v):
+    """Повертає текст JSON із Telethon DataJSON/bytes/str."""
+    if v is None:
+        return None
+    if isinstance(v, DataJSON):
+        return v.data
+    if isinstance(v, (bytes, bytearray)):
+        return v.decode("utf-8", "ignore")
+    if isinstance(v, str):
+        return v
+    return None
 
 async def fetch_stats_points(client: TelegramClient, channel: str):
     """
@@ -152,7 +101,7 @@ async def fetch_stats_points(client: TelegramClient, channel: str):
         return [(int(p.x), int(p.y or 0)) for p in pts]
 
     # 5) Універсально — парсимо JSON графа
-    j = getattr(graph, "json", None)
+    j = json_text(getattr(graph, "json", None))
     if not j:
         return []
 
@@ -188,7 +137,6 @@ async def fetch_stats_points(client: TelegramClient, channel: str):
 
     return points
 
-
 # ── Health ─────────────────────────────────────────────────────────────────────
 @app.get("/")
 def health():
@@ -197,7 +145,6 @@ def health():
         "env_ok": env_ok(),
         "telethon": getattr(telethon, "__version__", "unknown"),
     })
-
 
 # ── /hourly: 24 біни "hour of day" за останні 7 днів ──────────────────────────
 @app.get("/hourly")
@@ -209,7 +156,6 @@ def hourly_sync():
         return asyncio.run(hourly_async(channel))
     except Exception as e:
         return jsonify({"error": "Unhandled error in /hourly", "detail": str(e)}), 500
-
 
 async def hourly_async(channel: str):
     async with create_client() as client:
@@ -243,7 +189,6 @@ async def hourly_async(channel: str):
         out = [{"week_start": ws, "week_end": we, "hour": h, "views": by_hour.get(h, 0)} for h in range(24)]
         return jsonify(out)
 
-
 # ── /daily: підсумки за дату ───────────────────────────────────────────────────
 @app.get("/daily")
 def daily_sync():
@@ -256,16 +201,14 @@ def daily_sync():
     except Exception as e:
         return jsonify({"error": "Unhandled error in /daily", "detail": str(e)}), 500
 
-
 async def daily_async(channel: str, date_str: str):
-    # межі доби (Лісабон)
     try:
         day = TZ.localize(datetime.strptime(date_str, "%Y-%m-%d"))
     except Exception:
         return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
 
     start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = day.replace(hour=23, minute=59, second=59, microsecond=0)
+    end   = day.replace(hour=23, minute=59, second=59, microsecond=0)
 
     totals = {"views": 0, "forwards": 0, "pos": 0, "other": 0}
 

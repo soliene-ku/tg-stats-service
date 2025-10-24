@@ -193,12 +193,16 @@ async def hourly_async(channel: str):
 
             by_hour = defaultdict(int)
             try:
-                async for msg in client.iter_messages(entity, offset_date=end, reverse=True):
+                # NEW: iterate newest → oldest (default), stop when we're past the 7-day window
+                async for msg in client.iter_messages(entity, offset_date=end):
                     if not msg.date:
                         continue
                     dt = msg.date.astimezone(TZ)
+
+                    # Stop once messages are older than our 7-day window
                     if dt < start:
                         break
+
                     if msg.views:
                         by_hour[dt.hour] += int(msg.views)
             except FloodWaitError as e:

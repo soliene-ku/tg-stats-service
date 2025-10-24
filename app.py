@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytz
 from flask import Flask, jsonify, request
-from telethon import TelegramClient, functions, types
+from telethon import TelegramClient, types
+from telethon.tl.functions import stats as stats_fns
 from telethon.sessions import StringSession
 from telethon.errors import RPCError, UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError, ChatAdminRequiredError, FloodWaitError
 
@@ -50,7 +51,7 @@ async def hourly_async(channel: str):
     async with await get_client() as client:
         try:
             entity = await client.get_entity(channel)
-            stats = await client(functions.stats.GetBroadcastStats(channel=entity))
+           stats = await client(stats_fns.GetBroadcastStats(channel=entity))
         except (UsernameInvalidError, UsernameNotOccupiedError):
             return jsonify({"error": "Channel username not found", "channel": channel}), 400
         except ChannelPrivateError:

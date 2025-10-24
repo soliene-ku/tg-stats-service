@@ -1,0 +1,26 @@
+{
+  "name": "tg-stats-service",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/soliene-ku/tg-stats-service.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/soliene-ku/tg-stats-service/issues"
+  },
+  "homepage": "https://github.com/soliene-ku/tg-stats-service#readme",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "luxon": "^3.7.2",
+    "telegram": "^2.26.22"
+  }
+}

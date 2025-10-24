@@ -51,6 +51,64 @@ def create_client() -> TelegramClient:
         raise RuntimeError("TG_API_ID must be an integer")
     return TelegramClient(StringSession(string_session), api_id, api_hash)
 
+@app.get("/hourly_debug")
+def hourly_debug_sync():
+    channel = request.args.get("channel", "").strip()
+    if not channel:
+        return jsonify({"error": "Missing ?channel=@your_channel"}), 400
+    try:
+        return asyncio.run(hourly_debug_async(channel))
+    except Exception as e:
+        return jsonify({"error": "debug fail", "detail": str(e)}), 500
+
+async def hourly_debug_async(channel: str):
+    async with create_client() as client:
+        entity = await client.get_entity(channel)
+
+        # який саме метод є у твоїй Telethon
+        use_stats = (
+            stats_fns.GetBroadcastStats(channel=entity)
+            if hasattr(stats_fns, "GetBroadcastStats")
+            else stats_fns.GetBroadcastStatsRequest(channel=entity)
+        )
+        stats = await client(use_stats)
+
+        # подивимося, які поля в stats
+        attrs = [a for a in dir(stats) if "graph" in a or "hour" in a or "view" in a]
+
+        # візьмемо перший з можливих графів
+        graph = (
+            getattr(stats, "top_hours_graph", None)
+            or getattr(stats, "hours_graph", None)
+            or getattr(stats, "views_graph", None)
+        )
+
+        info = {
+            "attrs_in_stats": attrs,
+            "graph_present": graph is not None,
+            "graph_class": type(graph).__name__ if graph else None,
+            "has_points_attr": bool(getattr(graph, "points", None)) if graph else False,
+            "has_json_attr": bool(getattr(graph, "json", None)) if graph else False,
+        }
+
+        # якщо асинхр. граф — спробуймо догрузити
+        if isinstance(graph, types.StatsGraphAsync):
+            loader = (stats_fns.LoadAsyncGraph if hasattr(stats_fns, "LoadAsyncGraph")
+                      else stats_fns.LoadAsyncGraphRequest)
+            loaded = await client(loader(token=graph.token, x=0))
+            info["loaded_class"] = type(loaded).__name__
+            info["loaded_has_points"] = bool(getattr(loaded, "points", None))
+            j = getattr(loaded, "json", None)
+            info["loaded_has_json"] = bool(j)
+            info["loaded_json_preview"] = (j or "")[:500]
+            return jsonify(info)
+
+        # якщо одразу JSON — дай прев’ю
+        if graph is not None:
+            j = getattr(graph, "json", None)
+            info["json_preview"] = (j or "")[:500]
+        return jsonify(info)
+
 
 async def fetch_stats_points(client: TelegramClient, channel: str):
     """

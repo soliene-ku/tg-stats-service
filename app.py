@@ -61,13 +61,15 @@ def json_text(v):
 
 async def fetch_stats_points(client: TelegramClient, channel: str):
     """
-    Return list of (x, y) where x=unix timestamp, y=value.
-    Supports:
-      - StatsGraphAsync (via LoadAsyncGraph/LoadAsyncGraphRequest)
-      - StatsGraph with JSON payloads in several shapes
+    Return list of (x, y) points from Telegram stats graphs.
+    x can be either:
+      - hour-of-day index in [0..23], OR
+      - unix timestamp (seconds)
+    We'll detect which later.
     """
-    # 1) Resolve channel and fetch broadcast stats
     entity = await client.get_entity(channel)
+
+    # Fetch broadcast stats
     if hasattr(stats_fns, "GetBroadcastStats"):
         req_stats = stats_fns.GetBroadcastStats(channel=entity)
     elif hasattr(stats_fns, "GetBroadcastStatsRequest"):
@@ -76,16 +78,16 @@ async def fetch_stats_points(client: TelegramClient, channel: str):
         raise RuntimeError("Telethon has no GetBroadcastStats* in this build")
     stats = await client(req_stats)
 
-    # 2) Pull an hourly-capable graph
+    # Prefer hour-of-day graph first
     graph = (
-        getattr(stats, "top_hours_graph", None)
+        getattr(stats, "hours_graph", None)
+        or getattr(stats, "top_hours_graph", None)
         or getattr(stats, "views_graph", None)
-        or getattr(stats, "hours_graph", None)
     )
     if not graph:
         return []
 
-    # 3) If async graph — load it PROPERLY (channel required)
+    # If async graph — load with channel
     if isinstance(graph, types.StatsGraphAsync):
         if hasattr(stats_fns, "LoadAsyncGraph"):
             req_load = stats_fns.LoadAsyncGraph(channel=entity, token=graph.token, x=0)
@@ -95,12 +97,12 @@ async def fetch_stats_points(client: TelegramClient, channel: str):
             return []
         graph = await client(req_load)
 
-    # 4) Direct .points path
+    # Direct .points
     pts = getattr(graph, "points", None)
     if pts:
-        return [(int(p.x), int(p.y or 0)) for p in pts]
+        return [(int(getattr(p, "x", 0) or 0), int(getattr(p, "y", 0) or 0)) for p in pts]
 
-    # 5) Generic JSON parsing
+    # JSON parsing
     j = json_text(getattr(graph, "json", None))
     if not j:
         return []
@@ -111,17 +113,17 @@ async def fetch_stats_points(client: TelegramClient, channel: str):
         return []
 
     points = []
-
-    # Variant A: {"items":[{"x":..., "y":...}, ...]}
-    if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
+    # Variant A: {"items":[{"x":..., "y":...}]}
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
         for it in data["items"]:
             x = it.get("x")
             y = it.get("y")
             if x is not None and y is not None:
                 points.append((int(x), int(y or 0)))
+        return points
 
-    # Variant B: {"x":[...], "y":[...]} OR nested {"y":[{"data":[...]}]} OR {"y":{"data":[...]}} OR {"y":{"series":[{"data":[...]}]}}
-    elif isinstance(data, dict) and "x" in data and "y" in data:
+    # Variant B: {"x":[...], "y":[...]} or nested
+    if isinstance(data, dict) and "x" in data and "y" in data:
         xs = data.get("x") or []
         ys = data.get("y") or []
         series = None
@@ -141,6 +143,7 @@ async def fetch_stats_points(client: TelegramClient, channel: str):
             for x, y in zip(xs, series):
                 if x is not None and y is not None:
                     points.append((int(x), int(y or 0)))
+        return points
 
     return points
 
@@ -181,53 +184,58 @@ async def hourly_async(channel: str):
         except Exception as e:
             return jsonify({"error": f"Failed to fetch broadcast stats: {e}"}), 503
 
-        # Fallback: aggregate via messages if stats graph gave nothing
-        if not points:
-            try:
-                entity = await client.get_entity(channel)
-            except Exception as e:
-                return jsonify({"error": f"Failed to resolve entity for fallback: {e}"}), 503
-
-            end = datetime.now(TZ)
-            start = end - timedelta(days=7)
-
+        # If we have stats points, decide how to aggregate them
+        if points:
             by_hour = defaultdict(int)
-            try:
-                # NEW: iterate newest → oldest (default), stop when we're past the 7-day window
-                async for msg in client.iter_messages(entity, offset_date=end):
-                    if not msg.date:
-                        continue
-                    dt = msg.date.astimezone(TZ)
 
-                    # Stop once messages are older than our 7-day window
-                    if dt < start:
-                        break
+            # If x are hour-of-day indexes (0..23), use them directly
+            is_hour_index = all(0 <= x <= 23 for x, _ in points)
+            if is_hour_index:
+                for x, y in points:
+                    by_hour[int(x)] += int(y)
+            else:
+                # Otherwise x should be unix timestamps
+                for x, y in points:
+                    ts = ts_to_lisbon(int(x))
+                    by_hour[ts.hour] += int(y)
 
-                    if msg.views:
-                        by_hour[dt.hour] += int(msg.views)
-            except FloodWaitError as e:
-                return jsonify({"error": f"Flood wait during fallback: retry after {e.seconds} seconds"}), 503
-            except RPCError as e:
-                return jsonify({"error": f"Telegram RPC error during fallback: {e.__class__.__name__}", "detail": str(e)}), 409
-            except Exception as e:
-                return jsonify({"error": f"Failed during fallback aggregation: {e}"}), 503
-
-            today = end.date()
+            today = datetime.now(TZ).date()
             ws = (today - timedelta(days=6)).strftime("%Y-%m-%d")
             we = today.strftime("%Y-%m-%d")
             out = [{"week_start": ws, "week_end": we, "hour": h, "views": by_hour.get(h, 0)} for h in range(24)]
             return jsonify(out)
 
-        # Normal path: aggregate the fetched (ts, value) points into hours-of-day
-        by_hour = defaultdict(int)
-        for x, y in points:
-            ts = ts_to_lisbon(int(x))
-            by_hour[ts.hour] += int(y)
+        # Fallback: aggregate via messages if stats graph gave nothing
+        try:
+            entity = await client.get_entity(channel)
+        except Exception as e:
+            return jsonify({"error": f"Failed to resolve entity for fallback: {e}"}), 503
 
-        today = datetime.now(TZ).date()
+        end = datetime.now(TZ)
+        start = end - timedelta(days=7)
+
+        by_hour = defaultdict(int)
+        try:
+            # iterate newest → oldest (default), stop when past 7-day window
+            async for msg in client.iter_messages(entity, offset_date=end):
+                if not msg.date:
+                    continue
+                dt = msg.date.astimezone(TZ)
+                if dt < start:
+                    break
+                if msg.views:
+                    # NOTE: fallback approximates by post publish hour (not real view-hour distribution)
+                    by_hour[dt.hour] += int(msg.views)
+        except FloodWaitError as e:
+            return jsonify({"error": f"Flood wait during fallback: retry after {e.seconds} seconds"}), 503
+        except RPCError as e:
+            return jsonify({"error": f"Telegram RPC error during fallback: {e.__class__.__name__}", "detail": str(e)}), 409
+        except Exception as e:
+            return jsonify({"error": f"Failed during fallback aggregation: {e}"}), 503
+
+        today = end.date()
         ws = (today - timedelta(days=6)).strftime("%Y-%m-%d")
         we = today.strftime("%Y-%m-%d")
-
         out = [{"week_start": ws, "week_end": we, "hour": h, "views": by_hour.get(h, 0)} for h in range(24)]
         return jsonify(out)
 
@@ -302,7 +310,7 @@ async def daily_async(channel: str, date_str: str):
         "reactions_total": totals["pos"] + totals["other"],
     })
 
-# ── Entrypoint for local runs (Render will set gunicorn/uvicorn) ───────────────
+# ── Entrypoint ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)

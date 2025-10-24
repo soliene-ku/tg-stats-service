@@ -1,4 +1,4 @@
-# app.py
+# app.py (lazy env + clearer errors)
 import os, asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -9,24 +9,31 @@ from telethon import TelegramClient, functions, types
 from telethon.sessions import StringSession
 from telethon.errors import RPCError, UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError, ChatAdminRequiredError, FloodWaitError
 
-API_ID = int(os.environ["TG_API_ID"])
-API_HASH = os.environ["TG_API_HASH"]
-STRING_SESSION = os.environ["TG_STRING_SESSION"]
-
 TZ = pytz.timezone("Europe/Lisbon")
 POSITIVE_EMOJIS = {"👍","❤️","🔥","👏","😁","😊","🥳","😻","✨","💯","🙌","😍","😎"}
-
 app = Flask(__name__)
 
-def ts_to_lisbon(ts: int) -> datetime:
+def env_ok():
+    return all(os.getenv(k) for k in ("TG_API_ID","TG_API_HASH","TG_STRING_SESSION"))
+
+def ts_to_lisbon(ts: int):
     return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ)
 
 async def get_client():
-    return TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+    api_id = os.getenv("TG_API_ID")
+    api_hash = os.getenv("TG_API_HASH")
+    string_session = os.getenv("TG_STRING_SESSION")
+    if not api_id or not api_hash or not string_session:
+        raise RuntimeError("Missing TG_API_ID / TG_API_HASH / TG_STRING_SESSION in environment")
+    try:
+        api_id = int(api_id)
+    except Exception:
+        raise RuntimeError("TG_API_ID must be an integer")
+    return TelegramClient(StringSession(string_session), api_id, api_hash)
 
 @app.get("/")
 def health():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "env_ok": env_ok()})
 
 # ── /hourly ────────────────────────────────────────────────────────────────────
 @app.get("/hourly")
@@ -37,7 +44,6 @@ def hourly_sync():
     try:
         return asyncio.run(hourly_async(channel))
     except Exception as e:
-        # підстраховка, щоб ніколи не віддавати 500 без пояснення
         return jsonify({"error": "Unhandled error in /hourly", "detail": str(e)}), 500
 
 async def hourly_async(channel: str):
@@ -54,7 +60,6 @@ async def hourly_async(channel: str):
         except FloodWaitError as e:
             return jsonify({"error": f"Flood wait: retry after {e.seconds} seconds"}), 503
         except RPCError as e:
-            # типові: STATS_MIGRATE, STATS_GRAPH_INVALID, STATS_NOT_AVAILABLE тощо
             return jsonify({"error": f"Telegram RPC error: {e.__class__.__name__}", "detail": str(e)}), 409
         except Exception as e:
             return jsonify({"error": f"Failed to fetch broadcast stats: {e}"}), 503
@@ -63,7 +68,6 @@ async def hourly_async(channel: str):
         if not graph:
             return jsonify([])
 
-        # завантажуємо точки графіка
         try:
             if isinstance(graph, types.StatsGraphAsync):
                 loaded = await client(functions.stats.LoadAsyncGraph(token=graph.token, x=0))
@@ -72,11 +76,8 @@ async def hourly_async(channel: str):
                 points = getattr(graph, "points", []) or []
             else:
                 points = []
-        except RPCError:
-            # буває, коли граф недоступний — краще віддати порожньо, ніж 500
+        except Exception:
             points = []
-        except Exception as e:
-            return jsonify({"error": f"Failed to load stats graph: {e}"}), 503
 
         by_hour = defaultdict(int)
         for p in points:
@@ -89,7 +90,6 @@ async def hourly_async(channel: str):
         today = datetime.now(TZ).date()
         ws = (today - timedelta(days=6)).strftime("%Y-%m-%d")
         we = today.strftime("%Y-%m-%d")
-
         out = [{"week_start": ws, "week_end": we, "hour": h, "views": by_hour.get(h, 0)} for h in range(24)]
         return jsonify(out)
 
